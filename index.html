@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pole Cross-Section – Remaining Strength Estimator (Photo-based)</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #f6f7fb;
+      color: #111827;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 20px;
+    }
+    .container {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+    #poleCanvas {
+      border: 1px solid #d1d5db;
+      background: #ffffff;
+      cursor: crosshair;
+    }
+    .panel {
+      background: #ffffff;
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+      width: 360px;
+      box-sizing: border-box;
+      font-size: 13px;
+    }
+    .panel h2 {
+      font-size: 16px;
+      margin-top: 0;
+      margin-bottom: 8px;
+    }
+    .panel label {
+      display: block;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    .panel input[type="number"],
+    .panel input[type="file"],
+    .panel select {
+      width: 100%;
+      padding: 6px 8px;
+      margin-top: 4px;
+      box-sizing: border-box;
+      border-radius: 4px;
+      border: 1px solid #d1d5db;
+      font-size: 13px;
+    }
+    .panel button {
+      margin-top: 6px;
+      margin-right: 6px;
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: none;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: #2563eb;
+      color: #ffffff;
+    }
+    .btn-secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    .btn-danger {
+      background: #dc2626;
+      color: #ffffff;
+    }
+    .btn-toggle-active {
+      outline: 2px solid #2563eb;
+      outline-offset: 1px;
+    }
+    pre {
+      font-size: 12px;
+      background: #f3f4f6;
+      padding: 8px;
+      border-radius: 4px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+    small {
+      font-size: 11px;
+      color: #6b7280;
+    }
+    ul {
+      margin-top: 4px;
+      padding-left: 18px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Pole Cross-Section – Remaining Strength (Photo + Circle / Irregular)</h1>
+
+  <div class="container">
+    <canvas id="poleCanvas" width="600" height="600"></canvas>
+
+    <div class="panel">
+      <h2>Inputs & Modes</h2>
+
+      <label>
+        Upload pole cross-section photo
+        <input type="file" id="imageInput" accept="image/*" />
+      </label>
+
+      <label style="margin-top:8px;">
+        Pole shape mode
+        <select id="poleShapeSelect">
+          <option value="circle">Circle (use diameter)</option>
+          <option value="irregular">Irregular (draw boundary)</option>
+        </select>
+      </label>
+
+      <div style="margin-top:8px;">
+        <button id="modeDiameterBtn" class="btn-secondary">
+          Mode: Set diameter
+        </button>
+        <button id="modeBoundaryBtn" class="btn-secondary">
+          Mode: Draw pole boundary
+        </button>
+        <button id="modeDecayBtn" class="btn-secondary">
+          Mode: Draw decay
+        </button>
+      </div>
+
+      <div style="margin-top:4px;">
+        <button id="finishBoundaryBtn" class="btn-secondary">
+          Finish pole boundary
+        </button>
+        <button id="finishRegionBtn" class="btn-secondary">
+          Finish current decay region
+        </button>
+        <button id="clearRegionsBtn" class="btn-danger">
+          Clear boundary & decay
+        </button>
+      </div>
+
+      <label style="margin-top:10px;">
+        Original circumference C₀ (mm)
+        <input type="number" id="circumferenceInput" placeholder="e.g. 950" step="0.1" />
+      </label>
+
+      <button id="computeBtn" class="btn-primary" style="margin-top:10px;">
+        Compute areas & strength
+      </button>
+
+      <p style="margin-top:10px;">
+        <small><b>How to use:</b></small>
+        <small>
+          <ul>
+            <li>Upload a cross-section photo.</li>
+            <li>
+              If <b>Circle</b>: choose Mode: Set diameter, click two points across the pole.
+              The app will assume a circular cross-section.
+            </li>
+            <li>
+              If <b>Irregular</b>: choose Mode: Draw pole boundary, click multiple points to outline the pole shape,
+              then press <b>Finish pole boundary</b>.
+            </li>
+            <li>Then choose Mode: Draw decay, click around each decayed region to form polygons, and press <b>Finish current decay region</b> for each.</li>
+            <li>Enter the groundline circumference C₀ (mm) and click <b>Compute areas & strength</b>.</li>
+          </ul>
+        </small>
+      </p>
+
+      <h2>Results</h2>
+      <pre id="resultsBox">Waiting for input...</pre>
+      <small>
+        Strength ratio here is an <b>area-based approximation</b>:
+        we compute an area-equivalent radius R<sub>eq,area</sub> from remaining area
+        and estimate bending strength ≈ (C<sub>eq</sub> / C₀)³.
+        In irregular mode, total area A₀ is taken from C₀ via an equivalent-circle assumption
+        to derive the mm² / pixel² scale.
+      </small>
+    </div>
+  </div>
+
+  <script>
+    // ===== Canvas and basic setup =====
+    const canvas = document.getElementById('poleCanvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // Image
+    let img = null;
+    let imgLoaded = false;
+    let imgDrawX = 0, imgDrawY = 0, imgDrawW = W, imgDrawH = H;
+
+    // Shape mode: 'circle' or 'irregular'
+    let poleShape = 'circle';
+
+    // Circle-mode geometry
+    let poleCenter = null;    // { x, y }
+    let poleRadiusPx = 0;     // in pixels
+    let diameterPoints = [];  // two points for diameter
+
+    // Irregular-mode pole boundary polygon
+    let poleBoundaryPolygon = []; // [{x,y}, ...]
+
+    // Decay polygons
+    let decayPolygons = [];
+    let currentPolygon = [];
+
+    // Interaction mode: 'diameter' | 'boundary' | 'decay'
+    let mode = 'decay';
+
+    // UI elements
+    const imageInput = document.getElementById('imageInput');
+    const poleShapeSelect = document.getElementById('poleShapeSelect');
+    const modeDiameterBtn = document.getElementById('modeDiameterBtn');
+    const modeBoundaryBtn = document.getElementById('modeBoundaryBtn');
+    const modeDecayBtn = document.getElementById('modeDecayBtn');
+    const finishBoundaryBtn = document.getElementById('finishBoundaryBtn');
+    const finishRegionBtn = document.getElementById('finishRegionBtn');
+    const clearRegionsBtn = document.getElementById('clearRegionsBtn');
+    const circumferenceInput = document.getElementById('circumferenceInput');
+    const computeBtn = document.getElementById('computeBtn');
+    const resultsBox = document.getElementById('resultsBox');
+
+    // ===== Image loading =====
+    imageInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => {
+        img = image;
+        imgLoaded = true;
+        const scale = Math.min(W / img.width, H / img.height);
+        imgDrawW = img.width * scale;
+        imgDrawH = img.height * scale;
+        imgDrawX = (W - imgDrawW) / 2;
+        imgDrawY = (H - imgDrawH) / 2;
+
+        // Reset geometry
+        poleCenter = null;
+        poleRadiusPx = 0;
+        diameterPoints = [];
+        poleBoundaryPolygon = [];
+        decayPolygons = [];
+        currentPolygon = [];
+
+        resultsBox.textContent = 'Image loaded. Select pole shape, then define boundary and decay regions.';
+        drawScene();
+      };
+      image.src = url;
+    });
+
+    // ===== Pole shape selector =====
+    poleShapeSelect.addEventListener('change', (e) => {
+      poleShape = e.target.value;
+      // Reset relevant geometry when switching shape mode
+      if (poleShape === 'circle') {
+        poleBoundaryPolygon = [];
+      } else {
+        poleCenter = null;
+        poleRadiusPx = 0;
+        diameterPoints = [];
+      }
+      resultsBox.textContent = `Pole shape mode: ${poleShape}. Define boundary accordingly.`;
+      drawScene();
+    });
+
+    // ===== Mode switching =====
+    function setMode(newMode) {
+      mode = newMode;
+      modeDiameterBtn.classList.toggle('btn-toggle-active', mode === 'diameter');
+      modeBoundaryBtn.classList.toggle('btn-toggle-active', mode === 'boundary');
+      modeDecayBtn.classList.toggle('btn-toggle-active', mode === 'decay');
+    }
+
+    modeDiameterBtn.addEventListener('click', () => {
+      if (poleShape !== 'circle') {
+        alert('Diameter mode is only for Circle shape. Switch pole shape to "Circle" first.');
+        return;
+      }
+      setMode('diameter');
+    });
+
+    modeBoundaryBtn.addEventListener('click', () => {
+      if (poleShape !== 'irregular') {
+        alert('Boundary mode is only for Irregular shape. Switch pole shape to "Irregular" first.');
+        return;
+      }
+      setMode('boundary');
+    });
+
+    modeDecayBtn.addEventListener('click', () => {
+      setMode('decay');
+    });
+
+    // ===== Canvas interaction =====
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      if (!imgLoaded) {
+        alert('Please upload an image first.');
+        return;
+      }
+
+      if (mode === 'diameter' && poleShape === 'circle') {
+        handleDiameterClick(x, y);
+      } else if (mode === 'boundary' && poleShape === 'irregular') {
+        handleBoundaryClick(x, y);
+      } else if (mode === 'decay') {
+        handleDecayClick(x, y);
+      }
+    });
+
+    function handleDiameterClick(x, y) {
+      diameterPoints.push({ x, y });
+      if (diameterPoints.length === 2) {
+        const p1 = diameterPoints[0];
+        const p2 = diameterPoints[1];
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 10) {
+          alert('Diameter too short, please select two well-separated points.');
+          diameterPoints = [];
+        } else {
+          poleRadiusPx = dist / 2;
+          poleCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+          resultsBox.textContent = `Circle mode: pixel radius = ${poleRadiusPx.toFixed(1)} px`;
+          diameterPoints = [];
+        }
+      }
+      drawScene();
+    }
+
+    function handleBoundaryClick(x, y) {
+      // Only allow clicks inside image area (optional)
+      if (x < imgDrawX || x > imgDrawX + imgDrawW ||
+          y < imgDrawY || y > imgDrawY + imgDrawH) {
+        return;
+      }
+      poleBoundaryPolygon.push({ x, y });
+      drawScene();
+    }
+
+    function handleDecayClick(x, y) {
+      if (x < imgDrawX || x > imgDrawX + imgDrawW ||
+          y < imgDrawY || y > imgDrawY + imgDrawH) {
+        return;
+      }
+      currentPolygon.push({ x, y });
+      drawScene();
+    }
+
+    finishBoundaryBtn.addEventListener('click', () => {
+      if (poleShape !== 'irregular') {
+        alert('Pole boundary finishing is only for Irregular shape.');
+        return;
+      }
+      if (poleBoundaryPolygon.length < 3) {
+        alert('Need at least 3 points to define a boundary polygon.');
+        return;
+      }
+      // Just close visually; polygon itself is already stored
+      resultsBox.textContent = 'Pole boundary polygon set.';
+      drawScene();
+    });
+
+    finishRegionBtn.addEventListener('click', () => {
+      if (currentPolygon.length >= 3) {
+        decayPolygons.push([...currentPolygon]);
+      }
+      currentPolygon = [];
+      drawScene();
+    });
+
+    clearRegionsBtn.addEventListener('click', () => {
+      poleCenter = null;
+      poleRadiusPx = 0;
+      diameterPoints = [];
+      poleBoundaryPolygon = [];
+      decayPolygons = [];
+      currentPolygon = [];
+      resultsBox.textContent = 'Boundary and decay cleared. Define them again.';
+      drawScene();
+    });
+
+    // ===== Geometry helpers =====
+    function pointInPolygon(x, y, polygon) {
+      let inside = false;
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x, yi = polygon[i].y;
+        const xj = polygon[j].x, yj = polygon[j].y;
+        const intersect = ((yi > y) !== (yj > y)) &&
+                          (x < (xj - xi) * (y - yi) / (yj - yi + 1e-9) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
+    function pointInAnyDecayPolygon(x, y) {
+      for (const poly of decayPolygons) {
+        if (pointInPolygon(x, y, poly)) return true;
+      }
+      return false;
+    }
+
+    // ===== Compute areas & approximate strength =====
+    computeBtn.addEventListener('click', () => {
+      const C0 = parseFloat(circumferenceInput.value);
+      if (!C0 || C0 <= 0) {
+        alert('Please enter a valid original circumference C₀ (mm).');
+        return;
+      }
+      if (!imgLoaded) {
+        alert('Please upload an image first.');
+        return;
+      }
+
+      const R0_mm = C0 / (2 * Math.PI);
+
+      let totalPixels = 0;
+      let decayPixels = 0;
+
+      const step = 1; // pixel step
+
+      if (poleShape === 'circle') {
+        if (!poleCenter || poleRadiusPx <= 0) {
+          alert('In Circle mode, you must set diameter first.');
+          return;
+        }
+        const scale_mm_per_px = R0_mm / poleRadiusPx;
+        const pixelArea_mm2 = scale_mm_per_px * scale_mm_per_px;
+
+        for (let y = 0; y < H; y += step) {
+          for (let x = 0; x < W; x += step) {
+            const dx = x - poleCenter.x;
+            const dy = y - poleCenter.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist <= poleRadiusPx) {
+              totalPixels++;
+              if (pointInAnyDecayPolygon(x, y)) decayPixels++;
+            }
+          }
+        }
+
+        const A0_mm2 = totalPixels * pixelArea_mm2;
+        const Adecay_mm2 = decayPixels * pixelArea_mm2;
+        const Arem_mm2 = A0_mm2 - Adecay_mm2;
+        const areaRatio = Arem_mm2 / A0_mm2;
+
+        const Req_area_mm = Math.sqrt(Arem_mm2 / Math.PI);
+        const Ceq_area_mm = 2 * Math.PI * Req_area_mm;
+        const C_ratio = Ceq_area_mm / C0;
+        const strengthApprox = Math.pow(C_ratio, 3);
+
+        const lines = [];
+        lines.push('Mode: Circle (circular boundary from diameter).');
+        lines.push('');
+        lines.push('--- Geometry from circumference C₀ ---');
+        lines.push(`C₀           = ${C0.toFixed(2)} mm`);
+        lines.push(`R₀           = ${R0_mm.toFixed(2)} mm`);
+        lines.push('');
+        lines.push('--- Pixel-based area estimate (within defined circle) ---');
+        lines.push(`Total area A₀       ≈ ${A0_mm2.toFixed(1)} mm²`);
+        lines.push(`Decay area A_decay  ≈ ${Adecay_mm2.toFixed(1)} mm²`);
+        lines.push(`Remaining area A_rem ≈ ${Arem_mm2.toFixed(1)} mm²`);
+        lines.push(`Area ratio A_rem/A₀  = ${areaRatio.toFixed(4)} (${(areaRatio*100).toFixed(1)}%)`);
+        lines.push('');
+        lines.push('--- Area-equivalent circle & strength approximation ---');
+        lines.push(`R_eq,area          ≈ ${Req_area_mm.toFixed(2)} mm`);
+        lines.push(`C_eq,area          ≈ ${Ceq_area_mm.toFixed(2)} mm`);
+        lines.push(`C_eq,area / C₀      = ${C_ratio.toFixed(4)}`);
+        lines.push(`Approx. strength ≈ (C_eq/C₀)³ = ${strengthApprox.toFixed(4)}`);
+        lines.push('');
+        lines.push('Note: this is area-based; for rigorous bending use section modulus I_rem/c.');
+
+        resultsBox.textContent = lines.join('\n');
+
+      } else if (poleShape === 'irregular') {
+        if (!poleBoundaryPolygon || poleBoundaryPolygon.length < 3) {
+          alert('In Irregular mode, you must draw and finish the pole boundary.');
+          return;
+        }
+
+        // Count pixels inside irregular boundary
+        for (let y = 0; y < H; y += step) {
+          for (let x = 0; x < W; x += step) {
+            if (pointInPolygon(x, y, poleBoundaryPolygon)) {
+              totalPixels++;
+              if (pointInAnyDecayPolygon(x, y)) decayPixels++;
+            }
+          }
+        }
+
+        // A0 from circumference C0 (equivalent circle) to define mm²/pixel² scale
+        const A0_mm2 = (C0 * C0) / (4 * Math.PI);
+        const pixelArea_mm2 = A0_mm2 / totalPixels;
+        const Adecay_mm2 = decayPixels * pixelArea_mm2;
+        const Arem_mm2 = A0_mm2 - Adecay_mm2;
+        const areaRatio = Arem_mm2 / A0_mm2;
+
+        const Req_area_mm = Math.sqrt(Arem_mm2 / Math.PI);
+        const Ceq_area_mm = 2 * Math.PI * Req_area_mm;
+        const C_ratio = Ceq_area_mm / C0;
+        const strengthApprox = Math.pow(C_ratio, 3);
+
+        const lines = [];
+        lines.push('Mode: Irregular (pole boundary from polygon).');
+        lines.push('');
+        lines.push('--- Geometry from circumference C₀ ---');
+        lines.push(`C₀                = ${C0.toFixed(2)} mm`);
+        lines.push(`Equivalent-circle R₀ (from C₀) = ${R0_mm.toFixed(2)} mm`);
+        lines.push('');
+        lines.push('--- Pixel-based area estimate (within irregular boundary) ---');
+        lines.push(`Total area A₀ (from C₀)        ≈ ${A0_mm2.toFixed(1)} mm²`);
+        lines.push(`Decay area A_decay             ≈ ${Adecay_mm2.toFixed(1)} mm²`);
+        lines.push(`Remaining area A_rem           ≈ ${Arem_mm2.toFixed(1)} mm²`);
+        lines.push(`Area ratio A_rem/A₀            = ${areaRatio.toFixed(4)} (${(areaRatio*100).toFixed(1)}%)`);
+        lines.push('');
+        lines.push('--- Area-equivalent circle & strength approximation ---');
+        lines.push(`R_eq,area          ≈ ${Req_area_mm.toFixed(2)} mm`);
+        lines.push(`C_eq,area          ≈ ${Ceq_area_mm.toFixed(2)} mm`);
+        lines.push(`C_eq,area / C₀      = ${C_ratio.toFixed(4)}`);
+        lines.push(`Approx. strength ≈ (C_eq/C₀)³ = ${strengthApprox.toFixed(4)}`);
+        lines.push('');
+        lines.push('Note: irregular mode uses C₀ to set A₀ via an equivalent circle.');
+        lines.push('For rigorous bending strength, a section-modulus-based I_rem/c method can be added.');
+
+        resultsBox.textContent = lines.join('\n');
+      }
+    });
+
+    // ===== Drawing =====
+    function drawScene() {
+      ctx.clearRect(0, 0, W, H);
+
+      // Draw image
+      if (imgLoaded && img) {
+        ctx.drawImage(img, imgDrawX, imgDrawY, imgDrawW, imgDrawH);
+      } else {
+        ctx.fillStyle = '#f9fafb';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '14px system-ui';
+        ctx.fillText('Upload a cross-section photo on the right.', 20, 30);
+      }
+
+      // Draw irregular pole boundary
+      if (poleShape === 'irregular' && poleBoundaryPolygon.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(poleBoundaryPolygon[0].x, poleBoundaryPolygon[0].y);
+        for (let i = 1; i < poleBoundaryPolygon.length; i++) {
+          ctx.lineTo(poleBoundaryPolygon[i].x, poleBoundaryPolygon[i].y);
+        }
+        ctx.strokeStyle = '#0ea5e9';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = '#0ea5e9';
+        for (const p of poleBoundaryPolygon) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 3, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      }
+
+      // Draw decay polygons
+      for (const poly of decayPolygons) {
+        if (poly.length < 2) continue;
+        ctx.beginPath();
+        ctx.moveTo(poly[0].x, poly[0].y);
+        for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.35)';
+        ctx.strokeStyle = '#b91c1c';
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      // Draw current decay polygon
+      if (currentPolygon.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(currentPolygon[0].x, currentPolygon[0].y);
+        for (let i = 1; i < currentPolygon.length; i++) {
+          ctx.lineTo(currentPolygon[i].x, currentPolygon[i].y);
+        }
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#f97316';
+        for (const p of currentPolygon) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 3, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      }
+
+      // Draw circle diameter markers & circle (circle mode)
+      if (poleShape === 'circle') {
+        // Diameter click markers
+        if (diameterPoints.length > 0) {
+          ctx.fillStyle = '#22c55e';
+          for (const p of diameterPoints) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+          if (diameterPoints.length === 2) {
+            ctx.beginPath();
+            ctx.moveTo(diameterPoints[0].x, diameterPoints[0].y);
+            ctx.lineTo(diameterPoints[1].x, diameterPoints[1].y);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+        }
+        // Circle outline
+        if (poleCenter && poleRadiusPx > 0) {
+          ctx.beginPath();
+          ctx.arc(poleCenter.x, poleCenter.y, poleRadiusPx, 0, 2 * Math.PI);
+          ctx.strokeStyle = '#0ea5e9';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([5, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
+    // Initial view
+    drawScene();
+  </script>
+</body>
+</html>
